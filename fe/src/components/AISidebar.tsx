@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Sparkles, Code, FileText, TestTube, BarChart3,
+  Sparkles, Code, FileText, BarChart3,
 } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -32,17 +32,29 @@ const AISidebar: React.FC<AISidebarProps> = ({ code, language, onCodeGenerated }
     setAiOutput("");
 
     try {
-      const res = await fetch("http://localhost:8000/generate", {
+      let endpoint = "http://localhost:8000/generate";
+      let requestBody: any = { task, content, language };
+      
+      if (task === "explain") {
+        endpoint = "http://localhost:8000/explain";
+        requestBody = { code, language };
+      }
+
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task, content, language }),
+        body: JSON.stringify(requestBody),
       });
 
       const data = await res.json();
-      const cleanOutput = data.code?.replace(/\/\/.*|\/\*[\s\S]*?\*\/|#.*$/gm, ""); // remove comments
-      setAiOutput(cleanOutput || "// No AI output.");
-
-      if (task === "generate") onCodeGenerated(cleanOutput || "");
+      
+      if (task === "explain") {
+        setAiOutput(data.explanation || "// No explanation available.");
+      } else {
+        const cleanOutput = data.code?.replace(/\/\/.*|\/\*[\s\S]*?\*\/|#.*$/gm, ""); // remove comments
+        setAiOutput(cleanOutput || "// No AI output.");
+        if (task === "generate") onCodeGenerated(cleanOutput || "");
+      }
     } catch (err) {
       setAiOutput("// Error from AI server.");
     } finally {
@@ -130,12 +142,11 @@ const AISidebar: React.FC<AISidebarProps> = ({ code, language, onCodeGenerated }
       {/* Bottom Prompt + Buttons (Fixed) */}
       <div className="sticky bottom-0 bg-background border-t px-3 py-2 flex flex-col gap-2">
         {/* Task Buttons */}
-        <div className="grid grid-cols-3 gap-1">
-          <TaskButton label="Generate" value="generate" icon={<Sparkles className="w-3 h-3" />} />
-          <TaskButton label="Optimize" value="optimize" icon={<Code className="w-3 h-3" />} />
-          <TaskButton label="Explain" value="explain" icon={<FileText className="w-3 h-3" />} />
-          <TaskButton label="Test" value="test" icon={<TestTube className="w-3 h-3" />} />
-          <TaskButton label="Analyze" value="analyze" icon={<BarChart3 className="w-3 h-3" />} />
+        <div className="flex flex-row gap-2 justify-between py-4 px-2" style={{ minHeight: 64 }}>
+          <TaskButton label="Generate" value="generate" icon={<Sparkles className="w-5 h-5" />} />
+          <TaskButton label="Optimize" value="optimize" icon={<Code className="w-5 h-5" />} />
+          <TaskButton label="Explain" value="explain" icon={<FileText className="w-5 h-5" />} />
+          <TaskButton label="Analyze" value="analyze" icon={<BarChart3 className="w-5 h-5" />} />
         </div>
 
         {/* Prompt Box only for Generate */}

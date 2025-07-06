@@ -245,10 +245,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Issues**: [GitHub Issues](https://github.com/yourusername/codemate/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/yourusername/codemate/discussions)
-- **Email**: your.email@example.com
+- **Email**: yashbharvada4@gmail.com
 
 ---
 
-**Made with ❤️ by [Your Name]**
+**Made with JOY by Yash Bharvada,Pankti Akbari,Kushal Desai**
 
 *Star this repository if you found it helpful!* 

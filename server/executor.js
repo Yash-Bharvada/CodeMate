@@ -15,10 +15,12 @@ function runDockerCodeWithInput(code, lang, callback) {
   fs.mkdirSync(folder, { recursive: true });
 
   let filename = "";
+  let env = {};
   if (lang === "java") {
     const className = getPublicClassName(code);
     if (!className) return callback("❌ Java code must contain a `public class`.");
     filename = `${className}.java`;
+    env = { JAVA_FILE: filename }; // Pass file name to Docker
   } else if (lang === "cpp") {
     filename = "main.cpp";
   } else if (lang === "c") {
@@ -36,17 +38,23 @@ function runDockerCodeWithInput(code, lang, callback) {
     java: "java-runner",
     cpp: "cpp-runner",
     c: "c-runner",
-    python: "python-runner",
+    python: "python-runner"
   };
+
+  const image = imageMap[lang];
+  if (!image) return callback("❌ No Docker image found for this language.");
 
   const dockerCommand = [
     "docker", "run", "--rm",
-    "-i", // Required for interactive input
+    "-i",
     "-v", `${folder}:/app`,
-    imageMap[lang],
+    ...Object.entries(env).flatMap(([key, val]) => ["-e", `${key}=${val}`]),
+    image
   ];
 
-  const proc = spawn(dockerCommand[0], dockerCommand.slice(1), { stdio: "pipe" });
+  const proc = spawn(dockerCommand[0], dockerCommand.slice(1), {
+    stdio: "pipe"
+  });
 
   callback(null, {
     stdin: proc.stdin,
@@ -54,6 +62,7 @@ function runDockerCodeWithInput(code, lang, callback) {
     stderr: proc.stderr,
     process: proc,
     sessionId: id,
+    folder: folder
   });
 }
 

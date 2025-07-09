@@ -68,6 +68,7 @@ codemate/
 │   ├── language-runners/  # Docker configurations
 │   ├── temp/             # Temporary code files
 │   ├── index.js          # Main server file
+│   ├── executor.js       # Handles code exeuction using docker
 │   └── package.json      # Backend dependencies
 ├── README.md             # This file
 └── .gitignore           # Git ignore rules

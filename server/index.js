@@ -2,371 +2,273 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const fetch = require("node-fetch");
-const { exec, spawn } = require("child_process");
-const fs = require("fs");
+const { runDockerCodeWithInput } = require("./executor");
+const { spawn } = require("child_process");
 const path = require("path");
+const fs = require("fs");
 require("dotenv").config();
 
 const app = express();
 const PORT = 8000;
-const GROQ_API_KEY = process.env.GROQ_API_KEY || "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"; // fallback
+const GROQ_API_KEY = process.env.GROQ_API_KEY; //temporary fallback
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const TEMP_DIR = path.join(__dirname, "temp");
-if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
 
 app.use(cors());
 app.use(bodyParser.json());
 
 const processes = new Map();
 
-// 🧠 Run Code + Analyze
+// 🧠 Run Code
 app.post("/run", async (req, res) => {
   const { code, language, input = "" } = req.body;
-  const id = Date.now();
-  let filename, command;
 
-  try {
-    const inputFile = `${TEMP_DIR}/input-${id}.txt`;
-    fs.writeFileSync(inputFile, input);
+  if (!code || !language) {
+    return res.status(400).json({ error: "Code and language are required" });
+  }
 
-    if (language === "python") {
-      filename = `${TEMP_DIR}/code-${id}.py`;
-      fs.writeFileSync(filename, code);
-      command = `python3 ${filename} < ${inputFile}`;
-    } else if (language === "cpp") {
-      filename = `${TEMP_DIR}/code-${id}.cpp`;
-      const execFile = `${TEMP_DIR}/code-${id}.out`;
-      fs.writeFileSync(filename, code);
-      command = `g++ ${filename} -o ${execFile} && ${execFile} < ${inputFile}`;
-    } else if (language === "c") {
-      filename = `${TEMP_DIR}/code-${id}.c`;
-      const execFile = `${TEMP_DIR}/code-${id}.out`;
-      fs.writeFileSync(filename, code);
-      command = `gcc ${filename} -o ${execFile} && ${execFile} < ${inputFile}`;
-    } else if (language === "java") {
-      const match = code.match(/public\s+class\s+(\w+)/);
-      const className = match ? match[1] : `Main${id}`;
-      filename = `${TEMP_DIR}/${className}.java`;
-      fs.writeFileSync(filename, code);
-      command = `javac ${filename} && java -cp ${TEMP_DIR} ${className} < ${inputFile}`;
-    } else {
-      return res.status(400).json({ error: "Unsupported language" });
-    }
+  runDockerCodeWithInput(code, language, (err, execution) => {
+    if (err) return res.status(500).json({ error: err });
 
-    exec(command, { timeout: 10000 }, async (err, stdout, stderr) => {
-      const output = err ? (stderr || err.message) : stdout;
-      let time = "N/A", space = "N/A", summary = "", aiError = null;
+    const { stdin, stdout, stderr, process, folder } = execution;
+    let output = "", errorOutput = "";
 
-      try {
-        const analysisPrompt = `Analyze this ${language} code:\n\n\`\`\`${language}\n${code}\n\`\`\`\nRespond:\nTime: O(...)\nSpace: O(...)`;
+    stdout.on("data", (data) => output += data.toString());
+    stderr.on("data", (data) => errorOutput += data.toString());
 
-        const analysisRes = await fetch(GROQ_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${GROQ_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "llama3-70b-8192",
-            messages: [{ role: "user", content: analysisPrompt }],
-            temperature: 0.3,
-            max_tokens: 100,
-          }),
-        });
-
-        const analysisJson = await analysisRes.json();
-        if (!analysisRes.ok) throw new Error(analysisJson.error?.message || "Groq AI analysis failed");
-
-        const analysisText = analysisJson.choices?.[0]?.message?.content || "";
-        // Improved regex for time and space complexity extraction
-        let timeMatch = analysisText.match(/Time(?:\s*complexity)?\s*:?\s*O\(([^)]+)\)/i) ||
-                        analysisText.match(/O\(([^)]+)\).*time/i);
-        // Fallback: use the first O(...) in the text if timeMatch is not found
-        if (!timeMatch) {
-          const allMatches = [...analysisText.matchAll(/O\(([^)]+)\)/gi)];
-          if (allMatches.length > 0) {
-            timeMatch = allMatches[0];
-          }
-        }
-        let spaceMatch = analysisText.match(/Space(?:\s*complexity)?\s*:?\s*O\(([^)]+)\)/i) ||
-                           analysisText.match(/O\(([^)]+)\).*space/i);
-        // If no explicit space match, try to find any O(...) that's not the time complexity
-        if (!spaceMatch) {
-          const allMatches = [...analysisText.matchAll(/O\(([^)]+)\)/gi)];
-          if (allMatches.length > 1) {
-            // Use the second O(...) as space complexity
-            spaceMatch = allMatches[1];
-          } else if (allMatches.length === 1 && !timeMatch) {
-            // If only one O(...) and no time match, use it for both
-            spaceMatch = allMatches[0];
-          }
-        }
-        // Fallback: if we have time complexity but no space, infer space complexity
-        if (!spaceMatch && timeMatch) {
-          const timeComplexity = timeMatch[1].toLowerCase();
-          if (timeComplexity.includes('n')) {
-            // Common patterns: if time is O(n), space is often O(n) or O(1)
-            if (timeComplexity === 'n' || timeComplexity === 'n log n' || timeComplexity === 'n²' || timeComplexity === 'n^2') {
-              space = 'O(n)'; // Default to O(n) for most algorithms
-            } else if (timeComplexity === '1' || timeComplexity === 'log n') {
-              space = 'O(1)'; // Constant time usually means constant space
-            }
-          }
-        }
-        if (timeMatch) time = `O(${timeMatch[1]})`;
-        if (spaceMatch) space = `O(${spaceMatch[1]})`;
-
-        const summaryPrompt = `Explain in 1 line the time and space complexity of the following ${language} code:\n\`\`\`${language}\n${code}\n\`\`\``;
-
-        const summaryRes = await fetch(GROQ_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${GROQ_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: "llama3-70b-8192",
-            messages: [{ role: "user", content: summaryPrompt }],
-            temperature: 0.3,
-            max_tokens: 60,
-          }),
-        });
-
-        const summaryJson = await summaryRes.json();
-        if (!summaryRes.ok) throw new Error(summaryJson.error?.message || "Groq AI summary failed");
-
-        summary = summaryJson.choices?.[0]?.message?.content || "";
-      } catch (err) {
-        aiError = err.message;
-        console.error("❌ AI Error:", err.message);
-      }
-
+    process.on("close", () => {
+      // Send result to client
       res.json({
-        output: output.trim(),
-        time,
-        space,
-        summary: summary.trim(),
-        ai_status: aiError ? "failed" : "success",
-        ai_error: aiError,
+        output: errorOutput || output || "No output",
+        status: "success"
+      });
+
+      // Cleanup folder AFTER response
+      fs.rm(folder, { recursive: true, force: true }, (err) => {
+        if (err) console.warn("⚠️ Failed to delete temp folder:", folder);
       });
     });
-  } catch (err) {
-    res.status(500).json({ error: "Execution failed", details: err.message });
-  }
+
+    if (input) stdin.write(input + "\n");
+    stdin.end();
+  });
 });
+
+// 📊 Analyze Code Complexity
+app.post("/analyze", async (req, res) => {
+  const { code, language } = req.body;
+
+  if (!code || !language) {
+    return res.status(400).json({ error: "Code and language are required" });
+  }
+
+  let time = "N/A", space = "N/A", summary = "", aiError = null;
+
+  try {
+    const analysisPrompt = `You're an expert. Analyze this ${language} code and respond strictly in this format:\nTime: O(...)\nSpace: O(...)\n\nCode:\n${code}`;
+
+    const analysisRes = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama3-70b-8192",
+        messages: [{ role: "user", content: analysisPrompt }],
+        temperature: 0.3,
+        max_tokens: 100
+      })
+    });
+
+    const analysisJson = await analysisRes.json();
+    const analysisText = analysisJson.choices?.[0]?.message?.content || "";
+
+    const allMatches = [...analysisText.matchAll(/O\(([^)]+)\)/gi)];
+    if (allMatches.length > 0) time = `O(${allMatches[0][1]})`;
+    if (allMatches.length > 1) space = `O(${allMatches[1][1]})`;
+    else if (time !== "N/A") space = "O(1)";
+
+    const summaryPrompt = `Briefly explain the time and space complexity of this ${language} code:\n\n${code}`;
+    const summaryRes = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama3-70b-8192",
+        messages: [{ role: "user", content: summaryPrompt }],
+        temperature: 0.3,
+        max_tokens: 60
+      })
+    });
+
+    const summaryJson = await summaryRes.json();
+    summary = summaryJson.choices?.[0]?.message?.content?.trim() || "";
+
+  } catch (err) {
+    aiError = err.message;
+    console.error("❌ AI Error:", aiError);
+  }
+
+  res.json({
+    time,
+    space,
+    summary,
+    ai_status: aiError ? "failed" : "success",
+    ai_error: aiError
+  });
+});
+
+
 
 // 🤖 Generate Code
 app.post("/generate", async (req, res) => {
   const { prompt, content, task, language, context = "" } = req.body;
-  
-  // Handle both frontend formats: { prompt, language } or { content, task, language }
   const actualPrompt = prompt || content || "";
-  
-  if (!actualPrompt) {
-    return res.status(400).json({ error: "Prompt or content is required" });
-  }
+
+  if (!actualPrompt) return res.status(400).json({ error: "Prompt is required" });
 
   try {
-    const generatePrompt = `Generate ${language} code for the following request. Provide only the code without any explanations or comments:
-
-Request: ${actualPrompt}
-${context ? `Context: ${context}` : ''}
-
-Requirements:
-- Write clean, efficient ${language} code
-- Include proper error handling where appropriate
-- Follow ${language} best practices
-- Return only the code, no explanations`;
+    const generatePrompt = `Generate ${language} code for the following request. Respond with only valid code, no markdown or comments:\n\n${actualPrompt}${context ? `\n\nContext:\n${context}` : ""}`;
 
     const response = await fetch(GROQ_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "llama3-70b-8192",
         messages: [{ role: "user", content: generatePrompt }],
         temperature: 0.3,
-        max_tokens: 1000,
-      }),
+        max_tokens: 1000
+      })
     });
 
     const json = await response.json();
-    if (!response.ok) {
-      throw new Error(json.error?.message || "Groq AI generation failed");
+    const code = json.choices?.[0]?.message?.content || "";
+
+    // Remove markdown backticks
+    let cleanedCode = code.trim();
+
+    // Prefer content inside triple backticks
+    const match = cleanedCode.match(/```(?:\w+)?\s*([\s\S]*?)\s*```/);
+    if (match) {
+      cleanedCode = match[1].trim();
     }
 
-    const generatedCode = json.choices?.[0]?.message?.content || "";
-    
-    res.json({
-      code: generatedCode.trim(),
-      status: "success"
-    });
+    res.json({ code: cleanedCode, status: "success" });
   } catch (err) {
     console.error("❌ Generate Error:", err.message);
-    res.status(500).json({ 
-      error: "Code generation failed", 
-      details: err.message,
-      status: "failed"
-    });
+    res.status(500).json({ error: "Code generation failed", details: err.message });
   }
 });
 
 // 📝 Explain Code
 app.post("/explain", async (req, res) => {
   const { code, language } = req.body;
-  
-  if (!code) {
-    return res.status(400).json({ error: "Code is required" });
-  }
+
+  if (!code) return res.status(400).json({ error: "Code is required" });
 
   try {
-    const explainPrompt = `Explain this ${language} code in detail:
-
-\`\`\`${language}
-${code}
-\`\`\`
-
-Provide a comprehensive explanation including:
-1. What the code does
-2. How it works step by step
-3. Key concepts and algorithms used
-4. Time and space complexity analysis
-5. Any important notes or considerations`;
+    const explainPrompt = `Explain this ${language} code in detail:\n\n${code}\n\nInclude:\n1. What it does\n2. How it works\n3. Time/space complexity\n4. Key concepts or patterns`;
 
     const response = await fetch(GROQ_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "llama3-70b-8192",
         messages: [{ role: "user", content: explainPrompt }],
         temperature: 0.3,
-        max_tokens: 800,
-      }),
+        max_tokens: 800
+      })
     });
 
     const json = await response.json();
-    if (!response.ok) {
-      throw new Error(json.error?.message || "Groq AI explanation failed");
-    }
-
     const explanation = json.choices?.[0]?.message?.content || "";
-    
-    res.json({
-      explanation: explanation.trim(),
-      status: "success"
-    });
+
+    res.json({ explanation: explanation.trim(), status: "success" });
   } catch (err) {
     console.error("❌ Explain Error:", err.message);
-    res.status(500).json({ 
-      error: "Code explanation failed", 
-      details: err.message,
-      status: "failed"
-    });
+    res.status(500).json({ error: "Code explanation failed", details: err.message });
   }
 });
 
-// 🔄 Stream Code Execution (SSE)
+// 🔄 Stream Code Execution (Docker)
 app.get("/run-stream", (req, res) => {
   const { code, language } = req.query;
   const sessionId = Date.now().toString();
-  
+
   if (!code || !language) {
     return res.status(400).json({ error: "Code and language are required" });
   }
 
-  // Set SSE headers
+  // Setup SSE headers
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Cache-Control"
+    "Access-Control-Allow-Origin": "*"
   });
 
-  // Send session ID
   res.write(`data: __SESSION__${sessionId}\n\n`);
 
-  let filename, command;
-  const TEMP_DIR = path.join(__dirname, "temp");
-  if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
-
-  try {
-    if (language === "python") {
-      filename = `${TEMP_DIR}/code-${sessionId}.py`;
-      fs.writeFileSync(filename, code);
-      command = `python3 -u ${filename}`; // -u for unbuffered output
-    } else if (language === "cpp") {
-      filename = `${TEMP_DIR}/code-${sessionId}.cpp`;
-      const execFile = `${TEMP_DIR}/code-${sessionId}.out`;
-      fs.writeFileSync(filename, code);
-      command = `g++ ${filename} -o ${execFile} && ${execFile}`;
-    } else if (language === "c") {
-      filename = `${TEMP_DIR}/code-${sessionId}.c`;
-      const execFile = `${TEMP_DIR}/code-${sessionId}.out`;
-      fs.writeFileSync(filename, code);
-      command = `gcc ${filename} -o ${execFile} && ${execFile}`;
-    } else if (language === "java") {
-      const match = code.match(/public\s+class\s+(\w+)/);
-      const className = match ? match[1] : `Main${sessionId}`;
-      filename = `${TEMP_DIR}/${className}.java`;
-      fs.writeFileSync(filename, code);
-      command = `javac ${filename} && java -cp ${TEMP_DIR} ${className}`;
-    } else {
-      res.write(`data: Error: Unsupported language\n\n`);
+  runDockerCodeWithInput(code, language, (err, execution) => {
+    if (err) {
+      res.write(`data: Error: ${err}\n\n`);
       res.write(`data: __END__\n\n`);
       return res.end();
     }
 
-    const process = spawn(command, [], { 
-      shell: true,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+    const { stdin, stdout, stderr, process, folder } = execution;
 
-    // Store process for input handling
+    // Store the process for input handling
     processes.set(sessionId, process);
 
-    // Handle stdout
-    process.stdout.on('data', (data) => {
-      const output = data.toString();
-      res.write(`data: ${output}\n\n`);
+    // Stream stdout
+    stdout.on("data", (data) => {
+      res.write(`data: ${data.toString()}\n\n`);
     });
 
-    // Handle stderr
-    process.stderr.on('data', (data) => {
-      const error = data.toString();
-      res.write(`data: ${error}\n\n`);
+    // Stream stderr
+    stderr.on("data", (data) => {
+      res.write(`data: ${data.toString()}\n\n`);
     });
 
-    // Handle process end
-    process.on('close', (code) => {
+    // Clean up after process ends
+    process.on("close", () => {
       processes.delete(sessionId);
+
+      // ✅ Cleanup folder AFTER streaming ends
+      fs.rm(folder, { recursive: true, force: true }, (err) => {
+        if (err) console.warn("⚠️ Failed to delete stream folder:", folder);
+      });
+
       res.write(`data: __END__\n\n`);
       res.end();
     });
 
     // Handle process errors
-    process.on('error', (err) => {
+    process.on("error", (err) => {
       res.write(`data: Error: ${err.message}\n\n`);
       res.write(`data: __END__\n\n`);
       res.end();
     });
 
-  } catch (err) {
-    res.write(`data: Error: ${err.message}\n\n`);
-    res.write(`data: __END__\n\n`);
-    res.end();
-  }
+    // ❗ No need to call stdin.end() here — only for interactive
+  });
 });
+
+
 
 // 📥 Send Input to Running Process
 app.post("/send-input", (req, res) => {
   const { sessionId, input } = req.body;
-  
+
   if (!sessionId || !input) {
     return res.status(400).json({ error: "Session ID and input are required" });
   }
@@ -377,7 +279,7 @@ app.post("/send-input", (req, res) => {
   }
 
   try {
-    process.stdin.write(input + '\n');
+    process.stdin.write(input + "\n");
     res.json({ status: "success" });
   } catch (err) {
     res.status(500).json({ error: "Failed to send input", details: err.message });

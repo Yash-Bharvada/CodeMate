@@ -1,0 +1,55 @@
+# === BACKEND (Node.js) ===
+node_modules/
+.env
+.env.local
+.env.*.local
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime execution
+temp/
+*.pid
+*.seed
+*.pid.lock
+
+# === FRONTEND (React, Vite, Next.js) ===
+fe/node_modules/
+fe/.env
+fe/.env.local
+fe/.env.*.local
+fe/.next/
+fe/.turbo/
+fe/dist/
+fe/build/
+fe/.cache/
+fe/.vite/
+fe/coverage/
+
+# === DOCKER ===
+*.dockerfile~
+Dockerfile~
+docker-image.tar
+
+# === EDITORS / IDEs ===
+.vscode/
+.idea/
+*.sw?
+*.sublime-workspace
+*.sublime-project
+
+# === OS FILES ===
+.DS_Store
+Thumbs.db
+
+# === TEMP LANGUAGE EXECUTION DIRS ===
+*c-*/
+*cpp-*/
+*java-*/
+*python-*/
+
+# === MISC ===
+*.bak
+*~
